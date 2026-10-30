@@ -1,5 +1,8 @@
 package eu.kanade.tachiyomi.ui.reader.viewer
 
+import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.Intent
 import android.graphics.Bitmap
 import android.os.Build
 import android.util.Log
@@ -124,6 +127,36 @@ private data class RecursivePopupRequest(
     val deferredResult: kotlinx.coroutines.Deferred<chimahon.DictionaryRepository.LookupResult2>,
     val entryJsons: List<String>? = null,
 )
+
+/**
+ * Builds the prompt handed to an LLM app (via the share sheet) when the user taps
+ * "Explain" in the lookup popup. The title is included when known because it gives
+ * the model context for names, setting and speech style.
+ */
+private fun buildExplainPrompt(sentence: String, type: String, mediaInfo: MediaInfo?): String {
+    val medium = when (type) {
+        "anime" -> "anime"
+        "novel" -> "novel"
+        else -> "manga"
+    }
+    val title = mediaInfo?.mangaTitle?.takeIf { it.isNotBlank() }
+    val intro = if (title != null) {
+        "I'm a language learner. Here's a line from the $medium \"$title\":"
+    } else {
+        "I'm a language learner. Here's a line I came across:"
+    }
+    return buildString {
+        appendLine(intro)
+        appendLine()
+        appendLine(sentence.trim())
+        appendLine()
+        appendLine("1. Give a natural English translation.")
+        appendLine("2. Break it down word by word: reading, dictionary form and meaning.")
+        appendLine("3. Explain the grammar: particles, conjugations and any set patterns.")
+        appendLine("4. Point out anything casual, slang, dialect or implied, like a dropped subject.")
+        append("The text came from OCR, so if a character looks misread, say what it probably should be.")
+    }
+}
 
 
 @Composable
@@ -1177,6 +1210,79 @@ fun OcrLookupPopup(
         }
     }
 
+    fun shareSentenceForExplanation() {
+        val prompt = buildExplainPrompt(fullText, type, mediaInfo)
+        val sendIntent = Intent(Intent.ACTION_SEND)
+            .setType("text/plain")
+            .putExtra(Intent.EXTRA_TEXT, prompt)
+        val chooser = Intent.createChooser(sendIntent, "Explain with…")
+        // The screen-lookup overlay hosts this popup from a service context.
+        if (context !is Activity) {
+            chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        try {
+            context.startActivity(chooser)
+        } catch (e: ActivityNotFoundException) {
+            context.toast("No app available to share with")
+        }
+    }
+
+    @Composable
+    fun ExplainSentenceBar() {
+        val chromeBackground = if (eInkMode) {
+            if (isDark) Color.Black else Color.White
+        } else {
+            BgColor
+        }
+        val chromeText = if (eInkMode) {
+            if (isDark) Color.White else Color.Black
+        } else {
+            colorScheme.onSurfaceVariant
+        }
+        val chromeAccent = if (eInkMode) chromeText else colorScheme.primary
+        val chromeBorder = if (eInkMode) chromeText else colorScheme.outlineVariant
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { shareSentenceForExplanation() },
+            color = chromeBackground,
+            tonalElevation = 0.dp,
+            shadowElevation = 0.dp,
+        ) {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(1.dp)
+                        .background(chromeBorder),
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = fullText.trim().replace('\n', ' '),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = chromeText,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 12.dp),
+                    )
+                    Text(
+                        text = "Explain ↗",
+                        maxLines = 1,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = chromeAccent,
+                    )
+                }
+            }
+        }
+    }
+
     @Composable
     fun PopupContent() {
         val swipeThreshold = with(density) { popupSwipeThresholdPref.dp.toPx() }
@@ -1294,6 +1400,11 @@ fun OcrLookupPopup(
                         modifier = Modifier.padding(16.dp).align(Alignment.Center)
                     )
                 }
+                }
+                // Recursive child popups hold dictionary-definition text, not the
+                // original line, so the bar is only shown on the top-level popup.
+                if (!isRecursiveChild && fullText.isNotBlank()) {
+                    ExplainSentenceBar()
                 }
             }
         }
