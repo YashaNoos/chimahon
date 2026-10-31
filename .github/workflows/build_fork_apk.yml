@@ -52,18 +52,41 @@ jobs:
           java-version-file: .github/.java-version
           distribution: temurin
 
+      # The password never contains whitespace, so any spaces or line breaks
+      # picked up when pasting the secret are stripped before use.
+      - name: Check signing password opens the key
+        run: |
+          pw="$(printf '%s' "$SIGNING_PASSWORD" | tr -d '[:space:]')"
+          echo "::add-mask::$pw"
+          if [ "$pw" != "$SIGNING_PASSWORD" ]; then
+            echo "::warning title=Signing secret had extra whitespace::Stripped spaces or line breaks from FORK_SIGNING_PASSWORD."
+          fi
+          if ! keytool -list -storetype PKCS12 -keystore .github/signing/chimahon-fork.jks \
+               -storepass "$pw" -alias chimahon-fork > /dev/null 2> keytool.err; then
+            echo "::error title=Signing password doesn't open the key::FORK_SIGNING_PASSWORD (${#pw} characters after trimming, expected 32) was rejected: $(tr '\n' ' ' < keytool.err)"
+            exit 1
+          fi
+
       - name: Set up gradle
         uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6
 
       - name: Build app
         # android.injected.signing.* replaces the throwaway debug key with the
-        # fork's fixed key for this build only.
+        # fork's fixed key for this build only. On failure, the error is copied
+        # into an annotation so it shows on the run's summary page.
         run: |
-          ./gradlew assemblePreview \
-            -Pandroid.injected.signing.store.file="$GITHUB_WORKSPACE/.github/signing/chimahon-fork.jks" \
-            -Pandroid.injected.signing.store.password="$SIGNING_PASSWORD" \
-            -Pandroid.injected.signing.key.alias=chimahon-fork \
-            -Pandroid.injected.signing.key.password="$SIGNING_PASSWORD"
+          set -o pipefail
+          pw="$(printf '%s' "$SIGNING_PASSWORD" | tr -d '[:space:]')"
+          if ! ./gradlew assemblePreview \
+              -Pandroid.injected.signing.store.file="$GITHUB_WORKSPACE/.github/signing/chimahon-fork.jks" \
+              -Pandroid.injected.signing.store.password="$pw" \
+              -Pandroid.injected.signing.key.alias=chimahon-fork \
+              -Pandroid.injected.signing.key.password="$pw" 2>&1 | tee gradle.log; then
+            details="$( { grep -E '^e: ' gradle.log | head -15; sed -n '/What went wrong:/,/\* Try:/p' gradle.log | head -40; } \
+              | sed 's/%/%25/g; s/\r/%0D/g' | awk '{printf "%s%%0A", $0}')"
+            echo "::error title=Gradle build failed::${details:-No error summary found in the Gradle output.}"
+            exit 1
+          fi
 
       - name: Verify signing certificate
         run: |
