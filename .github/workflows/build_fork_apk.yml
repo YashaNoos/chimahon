@@ -1,8 +1,12 @@
 name: Build APK (fork)
 
-# Builds an installable, debug-signed "preview" APK without needing the
-# upstream project's signing or Google secrets. Runs on every push to the
-# explain-button branch, or manually from the Actions tab.
+# Builds an installable "preview" APK without needing the upstream project's
+# signing or Google secrets. Runs on every push to the explain-button branch,
+# or manually from the Actions tab.
+#
+# Every build is signed with the same key so new builds install over old ones
+# and keep their data. The key lives in .github/signing/chimahon-fork.jks,
+# encrypted with a password kept in the FORK_SIGNING_PASSWORD repository secret.
 on:
   push:
     branches:
@@ -21,7 +25,20 @@ jobs:
     name: Build preview APK
     runs-on: 'ubuntu-24.04'
 
+    env:
+      SIGNING_PASSWORD: ${{ secrets.FORK_SIGNING_PASSWORD }}
+      # SHA-256 of the signing certificate, so a build signed with any other
+      # key fails instead of producing an APK that won't install over the last one.
+      EXPECTED_CERT_SHA256: 0299355aa91d48fcd0d780627c630c16fd25f1d20241c1f3a11a98ab238ffc22
+
     steps:
+      - name: Check signing secret
+        run: |
+          if [ -z "$SIGNING_PASSWORD" ]; then
+            echo "::error title=Missing signing password::Add the FORK_SIGNING_PASSWORD secret under Settings > Secrets and variables > Actions, then re-run this build."
+            exit 1
+          fi
+
       - name: Clone repo
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -39,7 +56,27 @@ jobs:
         uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6
 
       - name: Build app
-        run: ./gradlew assemblePreview
+        # android.injected.signing.* replaces the throwaway debug key with the
+        # fork's fixed key for this build only.
+        run: |
+          ./gradlew assemblePreview \
+            -Pandroid.injected.signing.store.file="$GITHUB_WORKSPACE/.github/signing/chimahon-fork.jks" \
+            -Pandroid.injected.signing.store.password="$SIGNING_PASSWORD" \
+            -Pandroid.injected.signing.key.alias=chimahon-fork \
+            -Pandroid.injected.signing.key.password="$SIGNING_PASSWORD"
+
+      - name: Verify signing certificate
+        run: |
+          set -euo pipefail
+          build_tools="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          apk="$(ls app/build/outputs/apk/preview/*universal*.apk)"
+          actual="$("$build_tools/apksigner" verify --print-certs "$apk" | grep -m1 'certificate SHA-256 digest' | awk '{print $NF}')"
+          echo "Signed with certificate SHA-256: $actual"
+          if [ "$actual" != "$EXPECTED_CERT_SHA256" ]; then
+            echo "::error title=Wrong signing key::APK was signed with $actual, expected $EXPECTED_CERT_SHA256"
+            exit 1
+          fi
+          echo "::notice title=Signed with the fork's fixed key::$actual"
 
       - name: Upload APK
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
